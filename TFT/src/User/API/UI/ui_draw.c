@@ -1,9 +1,9 @@
 #define _GNU_SOURCE
-#include <stdio.h>
-#include <malloc.h>
 
 #include "ui_draw.h"
 #include "includes.h"
+#include <stdio.h>
+#include <malloc.h>
 
 #if (THUMBNAIL_PARSER == PARSER_BASE64PNG)
   #include "pngle.h"
@@ -130,31 +130,32 @@ typedef struct
   uint16_t pre_bgColor;
 } TEXT_ON_ICON;
 
-TEXT_ON_ICON backGroundIcon;
+TEXT_ON_ICON backgroundIcon;
 
 void ICON_PrepareRead(uint16_t sx, uint16_t sy, uint8_t icon)
 {
-  backGroundIcon.pre_bgColor = GUI_GetBkColor();
-  backGroundIcon.pre_mode = GUI_GetTextMode();
-  backGroundIcon.address = getBMPsize((uint8_t *)&backGroundIcon.w, (uint8_t *)&backGroundIcon.h, ICON_ADDR(icon));
-  backGroundIcon.sx = sx;
-  backGroundIcon.sy = sy;
+  backgroundIcon.pre_bgColor = GUI_GetBkColor();
+  backgroundIcon.pre_mode = GUI_GetTextMode();
+  backgroundIcon.address = getBMPsize((uint8_t *)&backgroundIcon.w, (uint8_t *)&backgroundIcon.h, ICON_ADDR(icon));
+  backgroundIcon.sx = sx;
+  backgroundIcon.sy = sy;
+
   GUI_SetTextMode(GUI_TEXTMODE_ON_ICON);
 }
 
 void ICON_PrepareReadEnd(void)
 {
-  GUI_SetBkColor(backGroundIcon.pre_bgColor);
-  GUI_SetTextMode(backGroundIcon.pre_mode);
+  GUI_SetBkColor(backgroundIcon.pre_bgColor);
+  GUI_SetTextMode(backgroundIcon.pre_mode);
 }
 
 uint16_t ICON_ReadPixel(int16_t x, int16_t y)
 {
   // // Out of range calls
-  // if ((x > backGroundIcon.sx + backGroundIcon.w) || (y > backGroundIcon.sy + backGroundIcon.h))
+  // if ((x > backgroundIcon.sx + backgroundIcon.w) || (y > backgroundIcon.sy + backgroundIcon.h))
   //   return 0;
   uint16_t color;
-  uint32_t address = backGroundIcon.address + ((x - backGroundIcon.sx) + (y - backGroundIcon.sy) * backGroundIcon.w) * 2;
+  uint32_t address = backgroundIcon.address + ((x - backgroundIcon.sx) + (y - backgroundIcon.sy) * backgroundIcon.w) * 2;
 
   W25Qxx_SPI_CS_Set(0);
   W25Qxx_SPI_Read_Write_Byte(CMD_READ_DATA);
@@ -323,29 +324,24 @@ void on_draw_png_pixel(pngle_t *pngle, uint32_t x, uint32_t y, uint32_t w, uint3
  * <BASE64 encoded PNG>
  * ; thumbnail end
  */
-bool model_DirectDisplay_Base64PNG(GUI_POINT pos, char *gcode)
+bool model_DirectDisplay_Base64PNG(GUI_POINT pos, FIL *gcodeFile)
 {
-  FIL gcodeFile;
   uint32_t base64_len;
   char buf[256];
 
   dbg_printf("PNG Gcode: %s\n", gcode);
 
-  if (f_open(&gcodeFile, gcode, FA_OPEN_EXISTING | FA_READ) != FR_OK)
-    return false;
-
   // Find thumbnail block with correct picture size
-  base64_len = modelFileSeekToThumbnailBase64PNG(&gcodeFile, ICON_WIDTH, ICON_HEIGHT);
+  base64_len = modelFileSeekToThumbnailBase64PNG(gcodeFile, ICON_WIDTH, ICON_HEIGHT);
 
   if (base64_len == 0)
   {
     dbg_printf("thumbnail for w=%d,h=%d not found.\n", ICON_WIDTH, ICON_HEIGHT);
-
     return false;
   }
 
   // Base64 decode on the fly while reading the PNG
-  b64_init(&gcode_thumb_b64, &gcodeFile, base64_len);
+  b64_init(&gcode_thumb_b64, gcodeFile, base64_len);
 
   pngle_t *pngle = pngle_new();
 
@@ -365,7 +361,6 @@ bool model_DirectDisplay_Base64PNG(GUI_POINT pos, char *gcode)
     if (fed < 0)
     {
       dbg_printf("pngle error: %s\n", pngle_error(pngle));
-
       goto pngle_failed;
     }
 
@@ -410,79 +405,60 @@ bool modelFileSeekToThumbnailRGB565(FIL *fp, uint16_t width, uint16_t height)
   return true;
 }
 
+#endif
+
 /**
- * Thumbnail is a "raw RGB56" file encoded as hexstring.
+ * Thumbnail is a raw RGB565 file encoded as hexstring.
  * Gcode format:
  * ; bigtreetech thumbnail begin <WIDTH>x<HEIGHT>
  * <WIDTHxHEIGHT 16-Bit RGB565 Data as Hexstring>
  * ; bigtreetech thumbnail end
  */
-bool model_DirectDisplay_RGB565(GUI_POINT pos, char *gcode)
+bool model_DirectDisplay_Classic(GUI_POINT pos, FIL *gcodeFile)
 {
-  FIL gcodeFile;
-
   dbg_printf("RGB565 Gcode: %s\n", gcode);
 
-  if (f_open(&gcodeFile, gcode, FA_OPEN_EXISTING | FA_READ) != FR_OK)
-    return false;
-
-  // Move the file cursor to the corresponding resolution area
-  if (!modelFileSeekToThumbnailRGB565(&gcodeFile, ICON_WIDTH, ICON_HEIGHT))
+  // try finding RGB565 thumbnail signature
+  #if (THUMBNAIL_PARSER >= PARSER_RGB565)
+    // Move the file cursor to the signature location if found
+    if (!modelFileSeekToThumbnailRGB565(gcodeFile, ICON_WIDTH, ICON_HEIGHT))
+    {
+      dbg_printf("bigtree thumbnail for w=%d,h=%d not found.\n", ICON_WIDTH, ICON_HEIGHT);
+      return false;
+    }
+    else
+  #endif
   {
-    dbg_printf("bigtree thumbnail for w=%d,h=%d not found.\n", ICON_WIDTH, ICON_HEIGHT);
+    // Move the file cursor to the predefined location
+    f_lseek(gcodeFile, MODEL_PREVIEW_OFFSET);
 
-    return false;
+    // Check whether the icon size matches
+    if (modelFileReadHalfword(gcodeFile) != ICON_WIDTH || modelFileReadHalfword(gcodeFile) != ICON_HEIGHT)
+      return false;
   }
 
   LCD_SetWindow(pos.x, pos.y, pos.x + ICON_WIDTH - 1, pos.y + ICON_HEIGHT - 1);
 
   for (uint16_t i = 0; i < ICON_WIDTH * ICON_HEIGHT; i++)
   {
-    LCD_WR_16BITS_DATA(modelFileReadHalfword(&gcodeFile));
+    LCD_WR_16BITS_DATA(modelFileReadHalfword(gcodeFile));
   }
-
-  return true;
-}
-
-#endif
-
-bool model_DirectDisplay_Classic(GUI_POINT pos, char *gcode)
-{
-  FIL gcodeFile;
-
-  if (f_open(&gcodeFile, gcode, FA_OPEN_EXISTING | FA_READ) != FR_OK)
-    return false;
-
-  // Move the file cursor to the corresponding resolution area
-  f_lseek(&gcodeFile, MODEL_PREVIEW_OFFSET);
-
-  // Check whether the icon size matches
-  if (modelFileReadHalfword(&gcodeFile) != ICON_WIDTH || modelFileReadHalfword(&gcodeFile) != ICON_HEIGHT)
-    return false;
-
-  LCD_SetWindow(pos.x, pos.y, pos.x + ICON_WIDTH - 1, pos.y + ICON_HEIGHT - 1);
-
-  for (uint16_t i = 0; i < ICON_WIDTH * ICON_HEIGHT; i++)
-  {
-    LCD_WR_16BITS_DATA(modelFileReadHalfword(&gcodeFile));
-  }
-
   return true;
 }
 
 bool model_DirectDisplay(GUI_POINT pos, char *gcode)
 {
-  // Try all compiled in options from fastest to slowest
-  if (model_DirectDisplay_Classic(pos, gcode))
+  FIL gcodeFile;
+
+  if (f_open(&gcodeFile, gcode, FA_OPEN_EXISTING | FA_READ) != FR_OK)
+    return false;
+
+  // Try all available options from fastest to slowest
+  if (model_DirectDisplay_Classic(pos, &gcodeFile))
     return true;
 
-  #if (THUMBNAIL_PARSER == PARSER_RGB565) || (THUMBNAIL_PARSER == PARSER_BASE64PNG)
-    if (model_DirectDisplay_RGB565(pos, gcode))
-      return true;
-  #endif
-
   #if (THUMBNAIL_PARSER == PARSER_BASE64PNG)
-    if (model_DirectDisplay_Base64PNG(pos, gcode))
+    if (model_DirectDisplay_Base64PNG(pos, &gcodeFile))
       return true;
   #endif
 
